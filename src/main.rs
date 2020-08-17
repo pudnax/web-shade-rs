@@ -14,6 +14,7 @@ struct State {
     swap_chain: wgpu::SwapChain,
 
     size: winit::dpi::PhysicalSize<u32>,
+    background: wgpu::Color,
 }
 
 impl State {
@@ -50,6 +51,13 @@ impl State {
         };
         let swap_chain = device.create_swap_chain(&surface, &sc_desc);
 
+        let background = wgpu::Color {
+            r: 0.1,
+            g: 0.2,
+            b: 0.3,
+            a: 1.0,
+        };
+
         Ok(Self {
             surface,
             adapter,
@@ -58,6 +66,7 @@ impl State {
             sc_desc,
             swap_chain,
             size,
+            background,
         })
     }
 
@@ -69,8 +78,25 @@ impl State {
     }
 
     // input() won't deal with GPU code, so it can be synchronous
-    fn input(&mut self, _event: &WindowEvent) -> bool {
-        false
+    fn input(&mut self, event: &WindowEvent) -> bool {
+        match event {
+            WindowEvent::CursorMoved { position, .. } => {
+                let x = (position.x / self.size.width as f64 - 0.5) * 2.0;
+                let y = -(position.y / self.size.height as f64 - 0.5) * 2.0;
+
+                println!("{:?}", (x, y));
+                let r = x * x + y * y;
+                let phi = x.atan2(y);
+                self.background = wgpu::Color {
+                    r,
+                    g: r * phi,
+                    b: r * phi.sin() * phi.cos(),
+                    a: 1.0,
+                };
+                false
+            }
+            _ => false,
+        }
     }
 
     fn update(&mut self) {}
@@ -92,12 +118,7 @@ impl State {
                 resolve_target: None,
                 load_op: wgpu::LoadOp::Clear,
                 store_op: wgpu::StoreOp::Store,
-                clear_color: wgpu::Color {
-                    r: 0.1,
-                    g: 0.2,
-                    b: 0.3,
-                    a: 1.0,
-                },
+                clear_color: self.background,
             }],
             depth_stencil_attachment: None,
         });
@@ -134,6 +155,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
                         state.resize(**new_inner_size);
+                    }
+                    WindowEvent::CursorMoved { .. } => {
+                        state.input(&event);
                     }
                     _ => {}
                 }
