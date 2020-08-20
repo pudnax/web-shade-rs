@@ -297,7 +297,6 @@ fn main() {
 
     use futures::executor::block_on;
 
-    // Since main can't be async, we're going to need to block
     let mut state = block_on(State::new(&window));
 
     event_loop.run(move |event, _, control_flow| {
