@@ -33,6 +33,21 @@ impl Uniforms {
     }
 }
 
+struct Instance {
+    position: utv::Vec3,
+    rotation: utv::Rotor3,
+}
+
+// TODO(#1): Pass `Instance` in the shaders by their own without `InstanceRaw`
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct InstanceRaw {
+    model: utv::Mat4,
+}
+
+unsafe impl bytemuck::Pod for InstanceRaw {}
+unsafe impl bytemuck::Zeroable for InstanceRaw {}
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 struct Vertex {
