@@ -16,6 +16,7 @@ cgmath = "0.17.0"
 log = "0.4.11"
 env_logger = "0.7.1"
 anyhow = "1.0"
+ultraviolet = "0.7.1"
 
 [dependencies.wgpu]
 version = "0.6.0"
