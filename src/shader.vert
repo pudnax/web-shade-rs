@@ -10,7 +10,12 @@ uniform Uniforms {
 	mat4 u_view_proj;
 };
 
+layout(set=1, binding=1)
+buffer Instances {
+	mat4 s_models[];
+};
+
 void main() {
 	v_tex_coords = a_tex_coords;
-    gl_Position = u_view_proj*vec4(a_position, 1.0);
+    gl_Position = u_view_proj * s_models[gl_InstanceIndex] * vec4(a_position, 1.0);
 }
