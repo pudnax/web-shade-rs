@@ -78,7 +78,6 @@ impl Model {
         let containing_folder = path.as_ref().parent().context("Directory has no parent")?;
 
         let mut materials = Vec::new();
-
         for mat in obj_materials {
             let diffuse_path = mat.diffuse_texture;
             let diffuse_texture =

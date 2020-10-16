@@ -23,6 +23,7 @@ layout(set=2, binding=0) uniform Light {
 void main() {
     vec4 object_color = texture(sampler2D(t_diffuse, s_diffuse), v_tex_coords);
 
+    // We don't need (or want) much ambient light, so 0.1 is fine
     float ambient_strength = 0.1;
     vec3 ambient_color = light_color * ambient_strength;
 

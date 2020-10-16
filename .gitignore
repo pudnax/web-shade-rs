@@ -15,4 +15,5 @@ Cargo.lock
 /target
 target
 src/**/*.sprv
+src/**/*.spv
 *.png
