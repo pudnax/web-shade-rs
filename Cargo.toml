@@ -27,3 +27,6 @@ fs_extra = "1.2.0"
 anyhow = "1.0"
 glob = "0.3"
 shaderc = "0.6"
+
+[profile.dev.package.'*']
+opt-level = 3
