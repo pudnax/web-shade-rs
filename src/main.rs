@@ -2,11 +2,12 @@ mod camera;
 mod model;
 mod texture;
 
-use model::Vertex;
+use model::{DrawLight, DrawModel, Vertex};
 
 use camera::{Camera, CameraController};
 
 use futures::executor::block_on;
+use std::convert::Into;
 use ultraviolet as utv;
 use wgpu::util::DeviceExt;
 use winit::{
@@ -17,7 +18,19 @@ use winit::{
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+struct Light {
+    position: utv::Vec3,
+    _padding: u32,
+    color: utv::Vec3,
+}
+
+unsafe impl bytemuck::Pod for Light {}
+unsafe impl bytemuck::Zeroable for Light {}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
 struct Uniforms {
+    view_position: utv::Vec4,
     view_proj: utv::Mat4,
 }
 
@@ -27,11 +40,13 @@ unsafe impl bytemuck::Zeroable for Uniforms {}
 impl Uniforms {
     fn new() -> Self {
         Self {
+            view_position: [0.; 4].into(),
             view_proj: utv::Mat4::identity(),
         }
     }
 
     fn update_view_proj(&mut self, camera: &Camera) {
+        self.view_position = camera.eye.into_homogeneous_point();
         self.view_proj = camera.build_view_projection_matrix();
     }
 }
@@ -91,6 +106,65 @@ struct State {
     depth_texture: texture::Texture,
 
     obj_model: model::Model,
+
+    light: Light,
+    light_buffer: wgpu::Buffer,
+    light_bind_group: wgpu::BindGroup,
+    light_render_pipeline: wgpu::RenderPipeline,
+}
+
+fn create_render_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    color_format: wgpu::TextureFormat,
+    depth_format: Option<wgpu::TextureFormat>,
+    vertex_descs: &[wgpu::VertexBufferDescriptor],
+    vs_data: wgpu::ShaderModuleSource,
+    fs_data: wgpu::ShaderModuleSource,
+) -> wgpu::RenderPipeline {
+    let vs_module = device.create_shader_module(vs_data);
+    let fs_module = device.create_shader_module(fs_data);
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Render Pipeline"),
+        layout: Some(&layout),
+        vertex_stage: wgpu::ProgrammableStageDescriptor {
+            module: &vs_module,
+            entry_point: "main",
+        },
+        fragment_stage: Some(wgpu::ProgrammableStageDescriptor {
+            module: &fs_module,
+            entry_point: "main",
+        }),
+        rasterization_state: Some(wgpu::RasterizationStateDescriptor {
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: wgpu::CullMode::Back,
+            depth_bias: 0,
+            depth_bias_slope_scale: 0.0,
+            depth_bias_clamp: 0.0,
+            clamp_depth: false,
+        }),
+        primitive_topology: wgpu::PrimitiveTopology::TriangleList,
+        color_states: &[wgpu::ColorStateDescriptor {
+            format: color_format,
+            color_blend: wgpu::BlendDescriptor::REPLACE,
+            alpha_blend: wgpu::BlendDescriptor::REPLACE,
+            write_mask: wgpu::ColorWrite::ALL,
+        }],
+        depth_stencil_state: depth_format.map(|format| wgpu::DepthStencilStateDescriptor {
+            format,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: wgpu::StencilStateDescriptor::default(),
+        }),
+        sample_count: 1,
+        sample_mask: !0,
+        alpha_to_coverage_enabled: false,
+        vertex_state: wgpu::VertexStateDescriptor {
+            index_format: wgpu::IndexFormat::Uint32,
+            vertex_buffers: vertex_descs,
+        },
+    })
 }
 
 impl State {
@@ -130,9 +204,6 @@ impl State {
         let diffuse_bytes = include_bytes!("./happy-tree.png");
         let diffuse_texture =
             texture::Texture::from_bytes(&device, &queue, diffuse_bytes, "happy_tree.png").unwrap();
-
-        let depth_texture =
-            texture::Texture::create_depth_texture(&device, &sc_desc, "depth+texture");
 
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -192,15 +263,6 @@ impl State {
             usage: wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
         });
 
-        let res_dir = std::path::Path::new(env!("OUT_DIR")).join("res");
-        let obj_model = model::Model::load(
-            &device,
-            &queue,
-            &texture_bind_group_layout,
-            res_dir.join("cube.obj"),
-        )
-        .unwrap();
-
         const SPACE_BETWEEN: f32 = 3.0;
         let instances = (0..NUM_INSTANCES_PER_ROW)
             .flat_map(|z| {
@@ -237,7 +299,7 @@ impl State {
                     // Camera uniforms
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: wgpu::ShaderStage::VERTEX,
+                        visibility: wgpu::ShaderStage::VERTEX | wgpu::ShaderStage::FRAGMENT,
                         ty: wgpu::BindingType::UniformBuffer {
                             dynamic: false,
                             min_binding_size: None,
@@ -274,56 +336,99 @@ impl State {
             label: Some("uniform_bind_group"),
         });
 
-        let vs_module = device.create_shader_module(wgpu::include_spirv!("shader.vert.sprv"));
-        let fs_module = device.create_shader_module(wgpu::include_spirv!("shader.frag.sprv"));
+        let res_dir = std::path::Path::new(env!("OUT_DIR")).join("res");
+        let obj_model = model::Model::load(
+            &device,
+            &queue,
+            &texture_bind_group_layout,
+            res_dir.join("cube.obj"),
+        )
+        .unwrap();
+
+        let light = Light {
+            position: (2.0, 2.0, 2.0).into(),
+            _padding: 0,
+            color: (1.0, 1.0, 1.0).into(),
+        };
+
+        let light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Light VB"),
+            contents: bytemuck::cast_slice(&[light]),
+            usage: wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
+        });
+
+        let light_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStage::VERTEX | wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::UniformBuffer {
+                        dynamic: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: None,
+            });
+
+        let light_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &light_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(light_buffer.slice(..)),
+            }],
+            label: None,
+        });
+
+        let depth_texture =
+            texture::Texture::create_depth_texture(&device, &sc_desc, "depth_texture");
 
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&texture_bind_group_layout, &uniform_bind_group_layout],
+                bind_group_layouts: &[
+                    &texture_bind_group_layout,
+                    &uniform_bind_group_layout,
+                    &light_bind_group_layout,
+                ],
                 push_constant_ranges: &[],
             });
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&render_pipeline_layout),
-            vertex_stage: wgpu::ProgrammableStageDescriptor {
-                module: &vs_module,
-                entry_point: "main",
-            },
-            fragment_stage: Some(wgpu::ProgrammableStageDescriptor {
-                module: &fs_module,
-                entry_point: "main",
-            }),
-            rasterization_state: Some(wgpu::RasterizationStateDescriptor {
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: wgpu::CullMode::Back,
-                depth_bias: 0,
-                depth_bias_slope_scale: 0.0,
-                depth_bias_clamp: 0.0,
-                clamp_depth: false,
-            }),
-            primitive_topology: wgpu::PrimitiveTopology::TriangleList,
-            color_states: &[wgpu::ColorStateDescriptor {
-                format: sc_desc.format,
-                color_blend: wgpu::BlendDescriptor::REPLACE,
-                alpha_blend: wgpu::BlendDescriptor::REPLACE,
-                write_mask: wgpu::ColorWrite::ALL,
-            }],
-            depth_stencil_state: Some(wgpu::DepthStencilStateDescriptor {
-                format: texture::Texture::DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilStateDescriptor::default(),
-            }),
-            vertex_state: wgpu::VertexStateDescriptor {
-                index_format: wgpu::IndexFormat::Uint32,
-                vertex_buffers: &[model::ModelVertex::desc()],
-            },
-            sample_count: 1,
-            sample_mask: 0,
-            alpha_to_coverage_enabled: false,
-        });
+        let render_pipeline = {
+            let vs_module = wgpu::include_spirv!("shader.vert.sprv");
+            let fs_module = wgpu::include_spirv!("shader.frag.sprv");
+
+            create_render_pipeline(
+                &device,
+                &render_pipeline_layout,
+                sc_desc.format,
+                Some(texture::Texture::DEPTH_FORMAT),
+                &[model::ModelVertex::desc()],
+                vs_module,
+                fs_module,
+            )
+        };
+
+        let light_render_pipeline = {
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Light Pipeline Layout"),
+                bind_group_layouts: &[&uniform_bind_group_layout, &light_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+            let vs_module = wgpu::include_spirv!("shader.vert.sprv");
+            let fs_module = wgpu::include_spirv!("shader.frag.sprv");
+
+            create_render_pipeline(
+                &device,
+                &layout,
+                sc_desc.format,
+                Some(texture::Texture::DEPTH_FORMAT),
+                &[model::ModelVertex::desc()],
+                vs_module,
+                fs_module,
+            )
+        };
 
         Ok(Self {
             surface,
@@ -348,6 +453,11 @@ impl State {
             depth_texture,
 
             obj_model,
+
+            light,
+            light_buffer,
+            light_bind_group,
+            light_render_pipeline,
         })
     }
 
@@ -375,6 +485,12 @@ impl State {
             0,
             bytemuck::cast_slice(&[self.uniforms]),
         );
+
+        let old_light_position = self.light.position;
+        self.light.position =
+            utv::Rotor3::from_rotation_xz(std::f32::consts::PI * 1.0 / 180.) * old_light_position;
+        self.queue
+            .write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&[self.light]));
     }
 
     fn render(&mut self) {
@@ -416,12 +532,18 @@ impl State {
             }),
         });
 
+        render_pass.set_pipeline(&self.light_render_pipeline);
+        render_pass.draw_light_model(
+            &self.obj_model,
+            &self.uniform_bind_group,
+            &self.light_bind_group,
+        );
         render_pass.set_pipeline(&self.render_pipeline);
-        use model::DrawModel;
         render_pass.draw_model_instanced(
             &self.obj_model,
             0..self.instances.len() as u32,
             &self.uniform_bind_group,
+            &self.light_bind_group,
         );
 
         drop(render_pass);
@@ -443,9 +565,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.update();
             state.render();
         }
-        Event::MainEventsCleared => {
-            window.request_redraw();
-        }
+        Event::MainEventsCleared => window.request_redraw(),
+
         Event::WindowEvent {
             ref event,
             window_id,
