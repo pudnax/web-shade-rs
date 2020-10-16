@@ -62,8 +62,6 @@ fn main() -> Result<()> {
         .iter_mut()
         .flatten()
         .map(|glob_result| ShaderData::load(glob_result?))
-        .collect::<Vec<Result<_>>>()
-        .into_iter()
         .collect::<Result<Vec<_>>>();
 
     let mut compiler = shaderc::Compiler::new().context("Unable to create shader compiler")?;

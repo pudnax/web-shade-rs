@@ -59,12 +59,14 @@ impl Texture {
             lod_max_clamp: 100.0,
             ..Default::default()
         });
+
         Self {
             texture,
             view,
             sampler,
         }
     }
+
     pub fn from_bytes(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -89,7 +91,6 @@ impl Texture {
             height: dimensions.1,
             depth: 1,
         };
-
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label,
             size,
