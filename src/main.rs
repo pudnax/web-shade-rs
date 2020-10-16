@@ -1,47 +1,159 @@
-mod camera;
+use std::iter;
+
+use cgmath::prelude::*;
+use ultraviolet as ulv;
+use wgpu::util::DeviceExt;
+use winit::{
+    event::*,
+    event_loop::{ControlFlow, EventLoop},
+    window::Window,
+};
+
 mod model;
 mod texture;
 
 use model::{DrawLight, DrawModel, Vertex};
 
-use camera::{Camera, CameraController};
+#[rustfmt::skip]
+pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 0.5, 0.0,
+    0.0, 0.0, 0.5, 1.0,
+);
 
-use futures::executor::block_on;
-use std::convert::Into;
-use ultraviolet as utv;
-use wgpu::util::DeviceExt;
-use winit::{
-    event::*,
-    event_loop::{ControlFlow, EventLoop},
-    window::{Window, WindowBuilder},
-};
+const NUM_INSTANCES_PER_ROW: u32 = 10;
 
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-struct Light {
-    position: utv::Vec3,
-    _padding: u32,
-    color: utv::Vec3,
+pub struct Camera {
+    pub eye: ulv::Vec3,
+    pub target: ulv::Vec3,
+    pub up: ulv::Vec3,
+    pub aspect: f32,
+    pub fovy: f32,
+    pub znear: f32,
+    pub zfar: f32,
 }
 
-unsafe impl bytemuck::Pod for Light {}
-unsafe impl bytemuck::Zeroable for Light {}
+impl Camera {
+    pub fn build_view_projection_matrix(&self) -> ulv::Mat4 {
+        let view = ulv::Mat4::look_at(self.eye, self.target, self.up);
+        let pi = std::f32::consts::PI;
+        let proj = ulv::projection::perspective_wgpu_dx(
+            pi * self.fovy / 180.0,
+            self.aspect,
+            self.znear,
+            self.zfar,
+        );
+
+        proj * view
+    }
+}
+
+pub struct CameraController {
+    speed: f32,
+    is_up_pressed: bool,
+    is_down_pressed: bool,
+    is_forward_pressed: bool,
+    is_backward_pressed: bool,
+    is_left_pressed: bool,
+    is_right_pressed: bool,
+}
+
+impl CameraController {
+    pub fn new(speed: f32) -> Self {
+        Self {
+            speed,
+            is_up_pressed: false,
+            is_down_pressed: false,
+            is_forward_pressed: false,
+            is_backward_pressed: false,
+            is_left_pressed: false,
+            is_right_pressed: false,
+        }
+    }
+
+    pub fn process_events(&mut self, event: &WindowEvent) -> bool {
+        match event {
+            WindowEvent::KeyboardInput {
+                input:
+                    KeyboardInput {
+                        state,
+                        virtual_keycode: Some(keycode),
+                        ..
+                    },
+                ..
+            } => {
+                let is_pressed = *state == ElementState::Pressed;
+                match keycode {
+                    VirtualKeyCode::Space => {
+                        self.is_up_pressed = is_pressed;
+                        true
+                    }
+                    VirtualKeyCode::LShift => {
+                        self.is_down_pressed = is_pressed;
+                        true
+                    }
+                    VirtualKeyCode::W | VirtualKeyCode::Up => {
+                        self.is_forward_pressed = is_pressed;
+                        true
+                    }
+                    VirtualKeyCode::A | VirtualKeyCode::Left => {
+                        self.is_left_pressed = is_pressed;
+                        true
+                    }
+                    VirtualKeyCode::S | VirtualKeyCode::Down => {
+                        self.is_backward_pressed = is_pressed;
+                        true
+                    }
+                    VirtualKeyCode::D | VirtualKeyCode::Right => {
+                        self.is_right_pressed = is_pressed;
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    pub fn update_camera(&mut self, camera: &mut Camera) {
+        let forward = camera.target - camera.eye;
+        let forward_norm = forward.normalized();
+        let forward_mag = forward.mag();
+
+        if self.is_forward_pressed && forward_mag > self.speed {
+            camera.eye += forward_norm * self.speed;
+        }
+        if self.is_backward_pressed {
+            camera.eye -= forward_norm * self.speed;
+        }
+
+        let right = forward_norm.cross(camera.up);
+
+        let forward = camera.target - camera.eye;
+        let _forward_mag = forward.mag();
+
+        if self.is_right_pressed {
+            camera.eye = camera.target - (forward + right * self.speed).normalized() * forward_mag;
+        }
+        if self.is_left_pressed {
+            camera.eye = camera.target - (forward - right * self.speed).normalized() * forward_mag;
+        }
+    }
+}
 
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Copy, Clone)]
 struct Uniforms {
-    view_position: utv::Vec4,
-    view_proj: utv::Mat4,
+    view_position: ulv::Vec4,
+    view_proj: ulv::Mat4,
 }
-
-unsafe impl bytemuck::Pod for Uniforms {}
-unsafe impl bytemuck::Zeroable for Uniforms {}
 
 impl Uniforms {
     fn new() -> Self {
         Self {
-            view_position: [0.; 4].into(),
-            view_proj: utv::Mat4::identity(),
+            view_position: ulv::Vec4::zero(),
+            view_proj: ulv::Mat4::from_scale_4d(0.),
         }
     }
 
@@ -50,38 +162,43 @@ impl Uniforms {
         self.view_proj = camera.build_view_projection_matrix();
     }
 }
-
-const NUM_INSTANCES_PER_ROW: u32 = 10;
-const NUM_INSTANCES: u32 = NUM_INSTANCES_PER_ROW * NUM_INSTANCES_PER_ROW;
-const INSTANCE_DISPLACEMENT: utv::Vec3 = utv::Vec3::new(
-    NUM_INSTANCES_PER_ROW as f32 * 0.5,
-    0.0,
-    NUM_INSTANCES_PER_ROW as f32 * 0.5,
-);
+unsafe impl bytemuck::Zeroable for Uniforms {}
+unsafe impl bytemuck::Pod for Uniforms {}
 
 struct Instance {
-    position: utv::Vec3,
-    rotation: utv::Rotor3,
+    position: ulv::Vec3,
+    rotation: ulv::Rotor3,
 }
 
 impl Instance {
     fn to_raw(&self) -> InstanceRaw {
         InstanceRaw {
-            model: utv::Mat4::from_translation(self.position)
+            model: ulv::Mat4::from_translation(self.position)
                 * self.rotation.into_matrix().into_homogeneous(),
         }
     }
 }
 
-// TODO: Pass `Instance` in the shaders by their own without `InstanceRaw`
-#[repr(C)]
 #[derive(Copy, Clone)]
 struct InstanceRaw {
-    model: utv::Mat4,
+    #[allow(dead_code)]
+    model: ulv::Mat4,
 }
 
 unsafe impl bytemuck::Pod for InstanceRaw {}
 unsafe impl bytemuck::Zeroable for InstanceRaw {}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+struct Light {
+    position: ulv::Vec3,
+    // Due to uniforms requiring 16 byte (4 float) spacing, we need to use a padding field here
+    _padding: u32,
+    color: ulv::Vec3,
+}
+
+unsafe impl bytemuck::Zeroable for Light {}
+unsafe impl bytemuck::Pod for Light {}
 
 struct State {
     surface: wgpu::Surface,
@@ -89,24 +206,18 @@ struct State {
     queue: wgpu::Queue,
     sc_desc: wgpu::SwapChainDescriptor,
     swap_chain: wgpu::SwapChain,
-    size: winit::dpi::PhysicalSize<u32>,
-
     render_pipeline: wgpu::RenderPipeline,
-
-    diffuse_bind_group: wgpu::BindGroup,
-
+    obj_model: model::Model,
     camera: Camera,
     camera_controller: CameraController,
     uniforms: Uniforms,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
-
     instances: Vec<Instance>,
-
+    #[allow(dead_code)]
+    instance_buffer: wgpu::Buffer,
     depth_texture: texture::Texture,
-
-    obj_model: model::Model,
-
+    size: winit::dpi::PhysicalSize<u32>,
     light: Light,
     light_buffer: wgpu::Buffer,
     light_bind_group: wgpu::BindGroup,
@@ -119,11 +230,11 @@ fn create_render_pipeline(
     color_format: wgpu::TextureFormat,
     depth_format: Option<wgpu::TextureFormat>,
     vertex_descs: &[wgpu::VertexBufferDescriptor],
-    vs_data: wgpu::ShaderModuleSource,
-    fs_data: wgpu::ShaderModuleSource,
+    vs_src: wgpu::ShaderModuleSource,
+    fs_src: wgpu::ShaderModuleSource,
 ) -> wgpu::RenderPipeline {
-    let vs_module = device.create_shader_module(vs_data);
-    let fs_module = device.create_shader_module(fs_data);
+    let vs_module = device.create_shader_module(vs_src);
+    let fs_module = device.create_shader_module(fs_src);
 
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("Render Pipeline"),
@@ -180,7 +291,6 @@ impl State {
             })
             .await
             .ok_or("Can't create surface from a raw window handler.")?;
-
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
@@ -199,11 +309,8 @@ impl State {
             height: size.height,
             present_mode: wgpu::PresentMode::Fifo,
         };
-        let swap_chain = device.create_swap_chain(&surface, &sc_desc);
 
-        let diffuse_bytes = include_bytes!("./happy-tree.png");
-        let diffuse_texture =
-            texture::Texture::from_bytes(&device, &queue, diffuse_bytes, "happy_tree.png").unwrap();
+        let swap_chain = device.create_swap_chain(&surface, &sc_desc);
 
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -228,25 +335,10 @@ impl State {
                 label: Some("texture_bind_group_layout"),
             });
 
-        let diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&diffuse_texture.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
-                },
-            ],
-            label: Some("diffuse_bind_group"),
-        });
-
         let camera = Camera {
             eye: (0.0, 5.0, -10.0).into(),
             target: (0.0, 0.0, 0.0).into(),
-            up: utv::Vec3::unit_y(),
+            up: ulv::Vec3::unit_y(),
             aspect: sc_desc.width as f32 / sc_desc.height as f32,
             fovy: 45.0,
             znear: 0.1,
@@ -257,6 +349,7 @@ impl State {
 
         let mut uniforms = Uniforms::new();
         uniforms.update_view_proj(&camera);
+
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Uniform Buffer"),
             contents: bytemuck::cast_slice(&[uniforms]),
@@ -270,14 +363,14 @@ impl State {
                     let x = SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
                     let z = SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
 
-                    let position = utv::Vec3::new(x as f32, 0.0, z as f32);
+                    let position = ulv::Vec3::new(x as f32, 0.0, z as f32);
 
                     let rotation = if position.mag() == 0. {
-                        utv::Rotor3::from_angle_plane(0.0, utv::Bivec3::unit_xy())
+                        ulv::Rotor3::from_angle_plane(0.0, ulv::Bivec3::unit_xy())
                     } else {
-                        utv::Rotor3::from_angle_plane(
+                        ulv::Rotor3::from_angle_plane(
                             std::f32::consts::PI * 45.0 / 180.0,
-                            utv::Bivec3::from_normalized_axis(position.normalized()),
+                            ulv::Bivec3::from_normalized_axis(position.normalized()),
                         )
                     };
 
@@ -296,7 +389,6 @@ impl State {
         let uniform_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
-                    // Camera uniforms
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStage::VERTEX | wgpu::ShaderStage::FRAGMENT,
@@ -306,7 +398,7 @@ impl State {
                         },
                         count: None,
                     },
-                    // Instances
+                    // NEW!
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
                         visibility: wgpu::ShaderStage::VERTEX,
@@ -328,6 +420,7 @@ impl State {
                     binding: 0,
                     resource: wgpu::BindingResource::Buffer(uniform_buffer.slice(..)),
                 },
+                // NEW!
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Buffer(instance_buffer.slice(..)),
@@ -394,20 +487,15 @@ impl State {
                 push_constant_ranges: &[],
             });
 
-        let render_pipeline = {
-            let vs_module = wgpu::include_spirv!("shader.vert.sprv");
-            let fs_module = wgpu::include_spirv!("shader.frag.sprv");
-
-            create_render_pipeline(
-                &device,
-                &render_pipeline_layout,
-                sc_desc.format,
-                Some(texture::Texture::DEPTH_FORMAT),
-                &[model::ModelVertex::desc()],
-                vs_module,
-                fs_module,
-            )
-        };
+        let render_pipeline = create_render_pipeline(
+            &device,
+            &render_pipeline_layout,
+            sc_desc.format,
+            Some(texture::Texture::DEPTH_FORMAT),
+            &[model::ModelVertex::desc()],
+            wgpu::include_spirv!("shader.vert.spv"),
+            wgpu::include_spirv!("shader.frag.spv"),
+        );
 
         let light_render_pipeline = {
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -416,17 +504,14 @@ impl State {
                 push_constant_ranges: &[],
             });
 
-            let vs_module = wgpu::include_spirv!("shader.vert.sprv");
-            let fs_module = wgpu::include_spirv!("shader.frag.sprv");
-
             create_render_pipeline(
                 &device,
                 &layout,
                 sc_desc.format,
                 Some(texture::Texture::DEPTH_FORMAT),
                 &[model::ModelVertex::desc()],
-                vs_module,
-                fs_module,
+                wgpu::include_spirv!("light.vert.spv"),
+                wgpu::include_spirv!("light.frag.spv"),
             )
         };
 
@@ -436,24 +521,17 @@ impl State {
             queue,
             sc_desc,
             swap_chain,
-            size,
-
             render_pipeline,
-
-            diffuse_bind_group,
+            obj_model,
             camera,
             camera_controller,
-
-            uniforms,
             uniform_buffer,
             uniform_bind_group,
-
+            uniforms,
             instances,
-
+            instance_buffer,
             depth_texture,
-
-            obj_model,
-
+            size,
             light,
             light_buffer,
             light_bind_group,
@@ -488,19 +566,17 @@ impl State {
 
         let old_light_position = self.light.position;
         self.light.position =
-            utv::Rotor3::from_rotation_xz(std::f32::consts::PI * 1.0 / 180.) * old_light_position;
+            ulv::Rotor3::from_rotation_xz(std::f32::consts::PI * 1.0 / 180.) * old_light_position;
         self.queue
             .write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&[self.light]));
     }
 
     fn render(&mut self) {
-        // FIXME: We have to deal with this error somehow... in some day...
-        let frame = match self.swap_chain.get_current_frame() {
-            Ok(frame) => frame.output,
-            Err(_) => {
-                return;
-            }
-        };
+        let frame = self
+            .swap_chain
+            .get_current_frame()
+            .expect("Timeout getting texture")
+            .output;
 
         let mut encoder = self
             .device
@@ -548,7 +624,7 @@ impl State {
 
         drop(render_pass);
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.queue.submit(iter::once(encoder.finish()));
     }
 }
 
@@ -556,48 +632,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let event_loop = EventLoop::new();
     let title = env!("CARGO_PKG_NAME");
-    let window = WindowBuilder::new().with_title(title).build(&event_loop)?;
-
+    let window = winit::window::WindowBuilder::new()
+        .with_title(title)
+        .build(&event_loop)?;
+    use futures::executor::block_on;
     let mut state = block_on(State::new(&window))?;
-
-    event_loop.run(move |event, _, control_flow| match event {
-        Event::RedrawRequested(_) => {
-            state.update();
-            state.render();
-        }
-        Event::MainEventsCleared => window.request_redraw(),
-
-        Event::WindowEvent {
-            ref event,
-            window_id,
-        } if window_id == window.id() => {
-            if !state.input(event) {
-                match event {
-                    WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
-                    WindowEvent::KeyboardInput { input, .. } => match input {
-                        KeyboardInput {
-                            state: ElementState::Pressed,
-                            virtual_keycode: Some(VirtualKeyCode::Escape),
-                            ..
-                        } => {
-                            *control_flow = ControlFlow::Exit;
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::Poll;
+        match event {
+            Event::MainEventsCleared => window.request_redraw(),
+            Event::WindowEvent {
+                ref event,
+                window_id,
+            } if window_id == window.id() => {
+                if !state.input(event) {
+                    match event {
+                        WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
+                        WindowEvent::KeyboardInput { input, .. } => match input {
+                            KeyboardInput {
+                                state: ElementState::Pressed,
+                                virtual_keycode: Some(VirtualKeyCode::Escape),
+                                ..
+                            } => {
+                                *control_flow = ControlFlow::Exit;
+                            }
+                            _ => {}
+                        },
+                        WindowEvent::Resized(physical_size) => {
+                            state.resize(*physical_size);
+                        }
+                        WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
+                            state.resize(**new_inner_size);
                         }
                         _ => {}
-                    },
-                    WindowEvent::Resized(physical_size) => {
-                        state.resize(*physical_size);
                     }
-                    WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
-                        state.resize(**new_inner_size);
-                    }
-                    WindowEvent::Moved(_) => {
-                        let new_size = window.inner_size();
-                        state.resize(new_size);
-                    }
-                    _ => {}
                 }
             }
+            Event::RedrawRequested(_) => {
+                state.update();
+                state.render();
+            }
+            _ => {}
         }
-        _ => {}
     });
 }
