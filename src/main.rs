@@ -389,6 +389,7 @@ impl State {
         let uniform_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
+                    // Camera uniforms
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStage::VERTEX | wgpu::ShaderStage::FRAGMENT,
@@ -398,7 +399,7 @@ impl State {
                         },
                         count: None,
                     },
-                    // NEW!
+                    // Instances
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
                         visibility: wgpu::ShaderStage::VERTEX,
@@ -420,7 +421,6 @@ impl State {
                     binding: 0,
                     resource: wgpu::BindingResource::Buffer(uniform_buffer.slice(..)),
                 },
-                // NEW!
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Buffer(instance_buffer.slice(..)),
