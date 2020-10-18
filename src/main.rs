@@ -2,6 +2,7 @@ use std::iter;
 
 use wgpu::util::DeviceExt;
 use winit::{
+    dpi::PhysicalPosition,
     event::*,
     event_loop::{ControlFlow, EventLoop},
     window::Window,
@@ -14,37 +15,16 @@ pub(crate) type Vec4 = ultraviolet::Vec4;
 pub(crate) type Vec3 = ultraviolet::Vec3;
 pub(crate) type Vec2 = ultraviolet::Vec2;
 
+mod angle;
+mod camera;
 mod model;
 mod texture;
+
+use angle::Deg;
 
 use model::{DrawLight, DrawModel, Material, Vertex};
 
 const NUM_INSTANCES_PER_ROW: u32 = 10;
-
-pub struct Camera {
-    pub eye: Vec3,
-    pub target: Vec3,
-    pub up: Vec3,
-    pub aspect: f32,
-    pub fovy: f32,
-    pub znear: f32,
-    pub zfar: f32,
-}
-
-impl Camera {
-    pub fn build_view_projection_matrix(&self) -> Mat4 {
-        let view = Mat4::look_at(self.eye, self.target, self.up);
-        let pi = std::f32::consts::PI;
-        let proj = ultraviolet::projection::perspective_wgpu_dx(
-            pi * self.fovy / 180.0,
-            self.aspect,
-            self.znear,
-            self.zfar,
-        );
-
-        proj * view
-    }
-}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -61,109 +41,13 @@ impl Uniforms {
         }
     }
 
-    fn update_view_proj(&mut self, camera: &Camera) {
-        self.view_position = camera.eye.into_homogeneous_point();
-        self.view_proj = camera.build_view_projection_matrix();
+    fn update_view_proj(&mut self, camera: &camera::Camera, projection: &camera::Projection) {
+        self.view_position = camera.position.into_homogeneous_point();
+        self.view_proj = projection.calc_matrix() * camera.calc_matrix()
     }
 }
 unsafe impl bytemuck::Zeroable for Uniforms {}
 unsafe impl bytemuck::Pod for Uniforms {}
-
-struct CameraController {
-    speed: f32,
-    is_up_pressed: bool,
-    is_down_pressed: bool,
-    is_forward_pressed: bool,
-    is_backward_pressed: bool,
-    is_left_pressed: bool,
-    is_right_pressed: bool,
-}
-
-impl CameraController {
-    fn new(speed: f32) -> Self {
-        Self {
-            speed,
-            is_up_pressed: false,
-            is_down_pressed: false,
-            is_forward_pressed: false,
-            is_backward_pressed: false,
-            is_left_pressed: false,
-            is_right_pressed: false,
-        }
-    }
-
-    fn process_events(&mut self, event: &WindowEvent) -> bool {
-        match event {
-            WindowEvent::KeyboardInput {
-                input:
-                    KeyboardInput {
-                        state,
-                        virtual_keycode: Some(keycode),
-                        ..
-                    },
-                ..
-            } => {
-                let is_pressed = *state == ElementState::Pressed;
-                match keycode {
-                    VirtualKeyCode::Space => {
-                        self.is_up_pressed = is_pressed;
-                        true
-                    }
-                    VirtualKeyCode::LShift => {
-                        self.is_down_pressed = is_pressed;
-                        true
-                    }
-                    VirtualKeyCode::W | VirtualKeyCode::Up => {
-                        self.is_forward_pressed = is_pressed;
-                        true
-                    }
-                    VirtualKeyCode::A | VirtualKeyCode::Left => {
-                        self.is_left_pressed = is_pressed;
-                        true
-                    }
-                    VirtualKeyCode::S | VirtualKeyCode::Down => {
-                        self.is_backward_pressed = is_pressed;
-                        true
-                    }
-                    VirtualKeyCode::D | VirtualKeyCode::Right => {
-                        self.is_right_pressed = is_pressed;
-                        true
-                    }
-                    _ => false,
-                }
-            }
-            _ => false,
-        }
-    }
-
-    pub fn update_camera(&self, camera: &mut Camera) {
-        let forward = camera.target - camera.eye;
-        let forward_norm = forward.normalized();
-        let forward_mag = forward.mag();
-
-        // Prevents glitching when camera gets too close to the
-        // center of the scene.
-        if self.is_forward_pressed && forward_mag > self.speed {
-            camera.eye += forward_norm * self.speed;
-        }
-        if self.is_backward_pressed {
-            camera.eye -= forward_norm * self.speed;
-        }
-
-        let right = forward_norm.cross(camera.up);
-
-        // Redo radius calc in case the up/ down is pressed.
-        let forward = camera.target - camera.eye;
-        let _forward_mag = forward.mag();
-
-        if self.is_right_pressed {
-            camera.eye = camera.target - (forward + right * self.speed).normalized() * forward_mag;
-        }
-        if self.is_left_pressed {
-            camera.eye = camera.target - (forward - right * self.speed).normalized() * forward_mag;
-        }
-    }
-}
 
 struct Instance {
     position: Vec3,
@@ -208,8 +92,11 @@ struct State {
     swap_chain: wgpu::SwapChain,
     render_pipeline: wgpu::RenderPipeline,
     obj_model: model::Model,
-    camera: Camera,
-    camera_controller: CameraController,
+    camera: camera::Camera,
+    projection: camera::Projection,
+    camera_controller: camera::CameraController,
+    last_mouse_pos: PhysicalPosition<f64>,
+    mouse_pressed: bool,
     uniforms: Uniforms,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
@@ -354,21 +241,13 @@ impl State {
                 ],
                 label: Some("texture_bind_group_layout"),
             });
-
-        let camera = Camera {
-            eye: (0.0, 5.0, -10.0).into(),
-            target: (0.0, 0.0, 0.0).into(),
-            up: Vec3::unit_y(),
-            aspect: sc_desc.width as f32 / sc_desc.height as f32,
-            fovy: 45.0,
-            znear: 0.1,
-            zfar: 100.0,
-        };
-
-        let camera_controller = CameraController::new(0.2);
+        let camera = camera::Camera::new((0.0, 5.0, 10.0), Deg(-90.0), Deg(-20.0));
+        let projection =
+            camera::Projection::new(sc_desc.width, sc_desc.height, Deg(45.0), 0.1, 100.0);
+        let camera_controller = camera::CameraController::new(4.0, 0.4);
 
         let mut uniforms = Uniforms::new();
-        uniforms.update_view_proj(&camera);
+        uniforms.update_view_proj(&camera, &projection);
 
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Uniform Buffer"),
@@ -574,7 +453,10 @@ impl State {
             render_pipeline,
             obj_model,
             camera,
+            projection,
             camera_controller,
+            last_mouse_pos: (0.0, 0.0).into(),
+            mouse_pressed: false,
             uniform_buffer,
             uniform_bind_group,
             uniforms,
@@ -592,7 +474,7 @@ impl State {
     }
 
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        self.camera.aspect = self.sc_desc.width as f32 / self.sc_desc.height as f32;
+        self.projection.resize(new_size.width, new_size.height);
         self.size = new_size;
         self.sc_desc.width = new_size.width;
         self.sc_desc.height = new_size.height;
@@ -602,12 +484,45 @@ impl State {
     }
 
     fn input(&mut self, event: &WindowEvent) -> bool {
-        self.camera_controller.process_events(event)
+        match event {
+            WindowEvent::KeyboardInput {
+                input:
+                    KeyboardInput {
+                        virtual_keycode: Some(key),
+                        state,
+                        ..
+                    },
+                ..
+            } => self.camera_controller.process_keyboard(*key, *state),
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.camera_controller.process_scroll(delta);
+                true
+            }
+            WindowEvent::MouseInput {
+                button: MouseButton::Left,
+                state,
+                ..
+            } => {
+                self.mouse_pressed = *state == ElementState::Pressed;
+                true
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let mouse_dx = position.x - self.last_mouse_pos.x;
+                let mouse_dy = position.y - self.last_mouse_pos.y;
+                self.last_mouse_pos = *position;
+                if self.mouse_pressed {
+                    self.camera_controller.process_mouse(mouse_dx, mouse_dy);
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
-    fn update(&mut self) {
-        self.camera_controller.update_camera(&mut self.camera);
-        self.uniforms.update_view_proj(&self.camera);
+    fn update(&mut self, dt: std::time::Duration) {
+        self.camera_controller.update_camera(&mut self.camera, dt);
+        self.uniforms
+            .update_view_proj(&self.camera, &self.projection);
         self.queue.write_buffer(
             &self.uniform_buffer,
             0,
@@ -616,7 +531,7 @@ impl State {
 
         let old_light_position = self.light.position;
         self.light.position =
-            Rotor3::from_rotation_xz(std::f32::consts::PI * 1.0 / 180.) * old_light_position;
+            Rotor3::from_rotation_xz(Deg(1.0 * dt.as_secs_f32()).into()) * old_light_position;
         self.queue
             .write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&[self.light]));
     }
@@ -689,6 +604,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build(&event_loop)?;
     use futures::executor::block_on;
     let mut state = block_on(State::new(&window))?;
+    let mut last_render_time = std::time::Instant::now();
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
         match event {
@@ -721,7 +637,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Event::RedrawRequested(_) => {
-                state.update();
+                let now = std::time::Instant::now();
+                let dt = now - last_render_time;
+                last_render_time = now;
+                state.update(dt);
                 state.render();
             }
             _ => {}
