@@ -8,6 +8,13 @@ use winit::{
     window::Window,
 };
 
+pub(crate) type Bivec3 = ultraviolet::Bivec3;
+pub(crate) type Rotor3 = ultraviolet::Rotor3;
+pub(crate) type Mat4 = ultraviolet::Mat4;
+pub(crate) type Vec4 = ultraviolet::Vec4;
+pub(crate) type Vec3 = ultraviolet::Vec3;
+pub(crate) type Vec2 = ultraviolet::Vec2;
+
 mod model;
 mod texture;
 
@@ -16,9 +23,9 @@ use model::{DrawLight, DrawModel, Vertex};
 const NUM_INSTANCES_PER_ROW: u32 = 10;
 
 pub struct Camera {
-    pub eye: ulv::Vec3,
-    pub target: ulv::Vec3,
-    pub up: ulv::Vec3,
+    pub eye: Vec3,
+    pub target: Vec3,
+    pub up: Vec3,
     pub aspect: f32,
     pub fovy: f32,
     pub znear: f32,
@@ -26,10 +33,10 @@ pub struct Camera {
 }
 
 impl Camera {
-    pub fn build_view_projection_matrix(&self) -> ulv::Mat4 {
-        let view = ulv::Mat4::look_at(self.eye, self.target, self.up);
+    pub fn build_view_projection_matrix(&self) -> Mat4 {
+        let view = Mat4::look_at(self.eye, self.target, self.up);
         let pi = std::f32::consts::PI;
-        let proj = ulv::projection::perspective_wgpu_dx(
+        let proj = ultraviolet::projection::perspective_wgpu_dx(
             pi * self.fovy / 180.0,
             self.aspect,
             self.znear,
@@ -136,15 +143,15 @@ impl CameraController {
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct Uniforms {
-    view_position: ulv::Vec4,
-    view_proj: ulv::Mat4,
+    view_position: Vec4,
+    view_proj: Mat4,
 }
 
 impl Uniforms {
     fn new() -> Self {
         Self {
-            view_position: ulv::Vec4::zero(),
-            view_proj: ulv::Mat4::from_scale_4d(0.),
+            view_position: Vec4::zero(),
+            view_proj: Mat4::from_scale_4d(0.),
         }
     }
 
@@ -157,14 +164,14 @@ unsafe impl bytemuck::Zeroable for Uniforms {}
 unsafe impl bytemuck::Pod for Uniforms {}
 
 struct Instance {
-    position: ulv::Vec3,
-    rotation: ulv::Rotor3,
+    position: Vec3,
+    rotation: Rotor3,
 }
 
 impl Instance {
     fn to_raw(&self) -> InstanceRaw {
         InstanceRaw {
-            model: ulv::Mat4::from_translation(self.position)
+            model: Mat4::from_translation(self.position)
                 * self.rotation.into_matrix().into_homogeneous(),
         }
     }
@@ -173,7 +180,7 @@ impl Instance {
 #[derive(Copy, Clone)]
 struct InstanceRaw {
     #[allow(dead_code)]
-    model: ulv::Mat4,
+    model: Mat4,
 }
 
 unsafe impl bytemuck::Pod for InstanceRaw {}
@@ -182,10 +189,10 @@ unsafe impl bytemuck::Zeroable for InstanceRaw {}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 struct Light {
-    position: ulv::Vec3,
+    position: Vec3,
     // Due to uniforms requiring 16 byte (4 float) spacing, we need to use a padding field here
     _padding: u32,
-    color: ulv::Vec3,
+    color: Vec3,
 }
 
 unsafe impl bytemuck::Zeroable for Light {}
@@ -322,6 +329,22 @@ impl State {
                         ty: wgpu::BindingType::Sampler { comparison: false },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStage::FRAGMENT,
+                        ty: wgpu::BindingType::SampledTexture {
+                            multisampled: false,
+                            component_type: wgpu::TextureComponentType::Float,
+                            dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStage::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler { comparison: false },
+                        count: None,
+                    },
                 ],
                 label: Some("texture_bind_group_layout"),
             });
@@ -329,7 +352,7 @@ impl State {
         let camera = Camera {
             eye: (0.0, 5.0, -10.0).into(),
             target: (0.0, 0.0, 0.0).into(),
-            up: ulv::Vec3::unit_y(),
+            up: Vec3::unit_y(),
             aspect: sc_desc.width as f32 / sc_desc.height as f32,
             fovy: 45.0,
             znear: 0.1,
@@ -354,14 +377,14 @@ impl State {
                     let x = SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
                     let z = SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
 
-                    let position = ulv::Vec3::new(x as f32, 0.0, z as f32);
+                    let position = Vec3::new(x as f32, 0.0, z as f32);
 
                     let rotation = if position.mag() == 0. {
-                        ulv::Rotor3::from_angle_plane(0.0, ulv::Bivec3::unit_xy())
+                        Rotor3::from_angle_plane(0.0, Bivec3::unit_xy())
                     } else {
-                        ulv::Rotor3::from_angle_plane(
+                        Rotor3::from_angle_plane(
                             std::f32::consts::PI * 45.0 / 180.0,
-                            ulv::Bivec3::from_normalized_axis(position.normalized()),
+                            Bivec3::from_normalized_axis(position.normalized()),
                         )
                     };
 
@@ -557,7 +580,7 @@ impl State {
 
         let old_light_position = self.light.position;
         self.light.position =
-            ulv::Rotor3::from_rotation_xz(std::f32::consts::PI * 1.0 / 180.) * old_light_position;
+            Rotor3::from_rotation_xz(std::f32::consts::PI * 1.0 / 180.) * old_light_position;
         self.queue
             .write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&[self.light]));
     }
