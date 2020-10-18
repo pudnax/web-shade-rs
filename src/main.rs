@@ -46,7 +46,30 @@ impl Camera {
     }
 }
 
-pub struct CameraController {
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct Uniforms {
+    view_position: Vec4,
+    view_proj: Mat4,
+}
+
+impl Uniforms {
+    fn new() -> Self {
+        Self {
+            view_position: Vec4::zero(),
+            view_proj: Mat4::from_scale_4d(0.),
+        }
+    }
+
+    fn update_view_proj(&mut self, camera: &Camera) {
+        self.view_position = camera.eye.into_homogeneous_point();
+        self.view_proj = camera.build_view_projection_matrix();
+    }
+}
+unsafe impl bytemuck::Zeroable for Uniforms {}
+unsafe impl bytemuck::Pod for Uniforms {}
+
+struct CameraController {
     speed: f32,
     is_up_pressed: bool,
     is_down_pressed: bool,
@@ -57,7 +80,7 @@ pub struct CameraController {
 }
 
 impl CameraController {
-    pub fn new(speed: f32) -> Self {
+    fn new(speed: f32) -> Self {
         Self {
             speed,
             is_up_pressed: false,
@@ -69,7 +92,7 @@ impl CameraController {
         }
     }
 
-    pub fn process_events(&mut self, event: &WindowEvent) -> bool {
+    fn process_events(&mut self, event: &WindowEvent) -> bool {
         match event {
             WindowEvent::KeyboardInput {
                 input:
@@ -118,6 +141,8 @@ impl CameraController {
         let forward_norm = forward.normalized();
         let forward_mag = forward.mag();
 
+        // Prevents glitching when camera gets too close to the
+        // center of the scene.
         if self.is_forward_pressed && forward_mag > self.speed {
             camera.eye += forward_norm * self.speed;
         }
@@ -127,6 +152,7 @@ impl CameraController {
 
         let right = forward_norm.cross(camera.up);
 
+        // Redo radius calc in case the up/ down is pressed.
         let forward = camera.target - camera.eye;
         let _forward_mag = forward.mag();
 
@@ -138,29 +164,6 @@ impl CameraController {
         }
     }
 }
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct Uniforms {
-    view_position: Vec4,
-    view_proj: Mat4,
-}
-
-impl Uniforms {
-    fn new() -> Self {
-        Self {
-            view_position: Vec4::zero(),
-            view_proj: Mat4::from_scale_4d(0.),
-        }
-    }
-
-    fn update_view_proj(&mut self, camera: &Camera) {
-        self.view_position = camera.eye.into_homogeneous_point();
-        self.view_proj = camera.build_view_projection_matrix();
-    }
-}
-unsafe impl bytemuck::Zeroable for Uniforms {}
-unsafe impl bytemuck::Pod for Uniforms {}
 
 struct Instance {
     position: Vec3,
@@ -280,6 +283,8 @@ impl State {
     async fn new(window: &Window) -> Result<Self, Box<dyn std::error::Error>> {
         let size = window.inner_size();
 
+        // The instance is a handle to our GPU
+        // BackendBit::PRIMARY => Vulkan + Metal + DX12 + Browser WebGPU
         let instance = wgpu::Instance::new(wgpu::BackendBit::PRIMARY);
         let surface = unsafe { instance.create_surface(window) };
         let adapter = instance
@@ -296,7 +301,7 @@ impl State {
                     limits: wgpu::Limits::default(),
                     shader_validation: true,
                 },
-                None,
+                None, // Trace path
             )
             .await?;
 
@@ -659,6 +664,7 @@ impl State {
             &self.uniform_bind_group,
             &self.light_bind_group,
         );
+
         render_pass.set_pipeline(&self.render_pipeline);
         render_pass.draw_model_instanced_with_material(
             &self.obj_model,

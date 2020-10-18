@@ -44,6 +44,7 @@ impl Vertex for ModelVertex {
                     shader_location: 2,
                     format: wgpu::VertexFormat::Float3,
                 },
+                // Tangent and bitangent
                 wgpu::VertexAttributeDescriptor {
                     offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
                     shader_location: 3,
