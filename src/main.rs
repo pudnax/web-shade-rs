@@ -1,6 +1,5 @@
 use std::iter;
 
-use ultraviolet as ulv;
 use wgpu::util::DeviceExt;
 use winit::{
     event::*,
@@ -18,7 +17,7 @@ pub(crate) type Vec2 = ultraviolet::Vec2;
 mod model;
 mod texture;
 
-use model::{DrawLight, DrawModel, Vertex};
+use model::{DrawLight, DrawModel, Material, Vertex};
 
 const NUM_INSTANCES_PER_ROW: u32 = 10;
 
@@ -114,7 +113,7 @@ impl CameraController {
         }
     }
 
-    pub fn update_camera(&mut self, camera: &mut Camera) {
+    pub fn update_camera(&self, camera: &mut Camera) {
         let forward = camera.target - camera.eye;
         let forward_norm = forward.normalized();
         let forward_mag = forward.mag();
@@ -220,6 +219,7 @@ struct State {
     light_buffer: wgpu::Buffer,
     light_bind_group: wgpu::BindGroup,
     light_render_pipeline: wgpu::RenderPipeline,
+    debug_material: Material,
 }
 
 fn create_render_pipeline(
@@ -318,8 +318,8 @@ impl State {
                         visibility: wgpu::ShaderStage::FRAGMENT,
                         ty: wgpu::BindingType::SampledTexture {
                             multisampled: false,
+                            component_type: wgpu::TextureComponentType::Float,
                             dimension: wgpu::TextureViewDimension::D2,
-                            component_type: wgpu::TextureComponentType::Uint,
                         },
                         count: None,
                     },
@@ -329,6 +329,7 @@ impl State {
                         ty: wgpu::BindingType::Sampler { comparison: false },
                         count: None,
                     },
+                    // normal map
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
                         visibility: wgpu::ShaderStage::FRAGMENT,
@@ -529,6 +530,36 @@ impl State {
             )
         };
 
+        let debug_material = {
+            let diffuse_bytes = include_bytes!("../res/cobble-diffuse.png");
+            let normal_bytes = include_bytes!("../res/cobble-normal.png");
+
+            let diffuse_texture = texture::Texture::from_bytes(
+                &device,
+                &queue,
+                diffuse_bytes,
+                "res/alt-diffuse.png",
+                false,
+            )
+            .unwrap();
+            let normal_texture = texture::Texture::from_bytes(
+                &device,
+                &queue,
+                normal_bytes,
+                "res/alt-normal.png",
+                true,
+            )
+            .unwrap();
+
+            model::Material::new(
+                &device,
+                "alt-material",
+                diffuse_texture,
+                normal_texture,
+                &texture_bind_group_layout,
+            )
+        };
+
         Ok(Self {
             surface,
             device,
@@ -550,6 +581,8 @@ impl State {
             light_buffer,
             light_bind_group,
             light_render_pipeline,
+
+            debug_material,
         })
     }
 
@@ -558,9 +591,7 @@ impl State {
         self.size = new_size;
         self.sc_desc.width = new_size.width;
         self.sc_desc.height = new_size.height;
-
         self.swap_chain = self.device.create_swap_chain(&self.surface, &self.sc_desc);
-
         self.depth_texture =
             texture::Texture::create_depth_texture(&self.device, &self.sc_desc, "depth_texture");
     }
@@ -629,8 +660,9 @@ impl State {
             &self.light_bind_group,
         );
         render_pass.set_pipeline(&self.render_pipeline);
-        render_pass.draw_model_instanced(
+        render_pass.draw_model_instanced_with_material(
             &self.obj_model,
+            &self.debug_material,
             0..self.instances.len() as u32,
             &self.uniform_bind_group,
             &self.light_bind_group,
