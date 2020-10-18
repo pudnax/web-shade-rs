@@ -513,8 +513,8 @@ impl State {
             sc_desc.format,
             Some(texture::Texture::DEPTH_FORMAT),
             &[model::ModelVertex::desc()],
-            wgpu::include_spirv!("shader.vert.spv"),
-            wgpu::include_spirv!("shader.frag.spv"),
+            wgpu::include_spirv!("shader.vert.sprv"),
+            wgpu::include_spirv!("shader.frag.sprv"),
         );
 
         let light_render_pipeline = {
@@ -530,8 +530,8 @@ impl State {
                 sc_desc.format,
                 Some(texture::Texture::DEPTH_FORMAT),
                 &[model::ModelVertex::desc()],
-                wgpu::include_spirv!("light.vert.spv"),
-                wgpu::include_spirv!("light.frag.spv"),
+                wgpu::include_spirv!("light.vert.sprv"),
+                wgpu::include_spirv!("light.frag.sprv"),
             )
         };
 
