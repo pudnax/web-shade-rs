@@ -1,22 +1,3 @@
-fn save_gif(
-    path: &str,
-    frames: &mut Vec<Vec<u8>>,
-    speed: i32,
-    size: u16,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use gif::{Encoder, Frame, Repeat};
-
-    let mut image = std::fs::File::create(path)?;
-    let mut encoder = Encoder::new(&mut image, size, size, &[])?;
-    encoder.set_repeat(Repeat::Infinite)?;
-
-    for mut frame in frames {
-        encoder.write_frame(&Frame::from_rgba_speed(size, size, &mut frame, speed))?;
-    }
-
-    Ok(())
-}
-
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let instance = wgpu::Instance::new(wgpu::BackendBit::PRIMARY);
 
@@ -46,34 +27,19 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         label: None,
     };
 
-    let colors = [
-        [0.0f64, 0.0, 0.0],
-        [0.0, 0.0, 0.2],
-        [0.0, 0.2, 0.2],
-        [0.2, 0.2, 0.2],
-        [0.2, 0.2, 0.2],
-        [0.0, 0.2, 0.2],
-        [0.0, 0.0, 0.2],
-        [0.0, 0.0, 0.0],
-    ];
-
     let texture = device.create_texture(&texture_desc);
     let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-    let pixel_size = std::mem::size_of::<[u8; 4]>() as u32;
-    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-    let unpadded_bytes_per_row = pixel_size * texture_size;
-    let padding = (align - unpadded_bytes_per_row % align) % align;
-    let padded_bytes_per_row = unpadded_bytes_per_row + padding;
+    let u32_size = std::mem::size_of::<u32>() as u32;
 
-    let buffer_size = (padded_bytes_per_row * texture_size) as wgpu::BufferAddress;
-    let buffer_desc = wgpu::BufferDescriptor {
-        size: buffer_size,
+    let output_buffer_size = (u32_size * texture_size * texture_size) as wgpu::BufferAddress;
+    let output_buffer_desc = wgpu::BufferDescriptor {
+        size: output_buffer_size,
         usage: wgpu::BufferUsage::COPY_DST | wgpu::BufferUsage::MAP_READ,
         mapped_at_creation: false,
         label: None,
     };
-    let output_buffer = device.create_buffer(&buffer_desc);
+    let output_buffer = device.create_buffer(&output_buffer_desc);
 
     let vs_src = include_str!("shader.vert");
     let fs_src = include_str!("shader.frag");
@@ -143,73 +109,64 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
     });
 
-    let mut frames = Vec::new();
-    for c in &colors {
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-        let render_pass_desc = wgpu::RenderPassDescriptor {
-            color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
-                attachment: &texture_view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: c[0],
-                        g: c[1],
-                        b: c[2],
-                        a: 1.0,
-                    }),
-                    store: true,
-                },
-            }],
-            depth_stencil_attachment: None,
-        };
-        let mut render_pass = encoder.begin_render_pass(&render_pass_desc);
-
-        render_pass.set_pipeline(&render_pipeline);
-        render_pass.draw(0..3, 0..1);
-
-        drop(render_pass);
-
-        encoder.copy_texture_to_buffer(
-            wgpu::TextureCopyView {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
+    let render_pass_desc = wgpu::RenderPassDescriptor {
+        color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
+            attachment: &texture_view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color {
+                    r: 0.1,
+                    g: 0.2,
+                    b: 0.3,
+                    a: 1.0,
+                }),
+                store: true,
             },
-            wgpu::BufferCopyView {
-                buffer: &output_buffer,
-                layout: wgpu::TextureDataLayout {
-                    offset: 0,
-                    bytes_per_row: padded_bytes_per_row,
-                    rows_per_image: texture_size,
-                },
+        }],
+        depth_stencil_attachment: None,
+    };
+    let mut render_pass = encoder.begin_render_pass(&render_pass_desc);
+
+    render_pass.set_pipeline(&render_pipeline);
+    render_pass.draw(0..3, 0..1);
+
+    drop(render_pass);
+
+    encoder.copy_texture_to_buffer(
+        wgpu::TextureCopyView {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+        },
+        wgpu::BufferCopyView {
+            buffer: &output_buffer,
+            layout: wgpu::TextureDataLayout {
+                offset: 0,
+                bytes_per_row: u32_size * texture_size,
+                rows_per_image: texture_size,
             },
-            texture_desc.size,
-        );
+        },
+        texture_desc.size,
+    );
 
-        queue.submit(std::iter::once(encoder.finish()));
+    queue.submit(std::iter::once(encoder.finish()));
 
-        let mapping = output_buffer.slice(..).map_async(wgpu::MapMode::Read);
-        device.poll(wgpu::Maintain::Wait);
+    let mapping = output_buffer.slice(..).map_async(wgpu::MapMode::Read);
+    device.poll(wgpu::Maintain::Wait);
 
-        mapping.await?;
+    mapping.await.unwrap();
 
-        let padded_data = output_buffer.slice(..).get_mapped_range();
-        let data = padded_data
-            .chunks(padded_bytes_per_row as _)
-            .map(|chunk| &chunk[..unpadded_bytes_per_row as _])
-            .flatten()
-            .cloned()
-            .collect::<Vec<_>>();
-        drop(padded_data);
-        output_buffer.unmap();
-        frames.push(data);
-    }
+    let data = output_buffer.slice(..).get_mapped_range();
 
-    save_gif("output.gif", &mut frames, 1, texture_size as u16)?;
+    use image::{ImageBuffer, Rgba};
+    let buffer = ImageBuffer::<Rgba<u8>, _>::from_raw(texture_size, texture_size, data).unwrap();
 
-    println!("Hello, Gif!");
+    buffer.save("image.png").unwrap();
+
+    println!("Hello, Image!");
 
     Ok(())
 }

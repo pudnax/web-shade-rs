@@ -17,6 +17,7 @@ env_logger = "0.7.1"
 anyhow = "1.0"
 ultraviolet = "0.7.1"
 tobj = "2.0.2"
+gif = "0.11.1"
 
 [dependencies.wgpu]
 version = "0.6.0"
@@ -34,3 +35,7 @@ opt-level = 3
 [[example]]
 name = "gif"
 path = "examples/gif/src/main.rs"
+
+[[example]]
+name = "image"
+path = "examples/image/src/main.rs"
