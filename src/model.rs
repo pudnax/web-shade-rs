@@ -1,5 +1,6 @@
 use crate::{Vec2, Vec3};
 use anyhow::*;
+use rayon::prelude::*;
 use std::ops::Range;
 use std::path::Path;
 use wgpu::util::DeviceExt;
@@ -121,7 +122,7 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn load<P: AsRef<Path>>(
+    pub fn load<P: AsRef<Path> + Sync>(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         layout: &wgpu::BindGroupLayout,
@@ -131,101 +132,110 @@ impl Model {
 
         let containing_folder = path.as_ref().parent().context("Directory has no parent")?;
 
-        let mut materials = Vec::new();
-        for mat in obj_materials {
-            let diffuse_path = mat.diffuse_texture;
-            let diffuse_texture =
-                texture::Texture::load(device, queue, containing_folder.join(diffuse_path), false)?;
+        let materials = obj_materials
+            .par_iter()
+            .map(|mat| {
+                let mut textures = [
+                    (containing_folder.join(&mat.diffuse_texture), false),
+                    (containing_folder.join(&mat.normal_texture), true),
+                ]
+                .par_iter()
+                .map(|(texture_path, is_normal_map)| {
+                    texture::Texture::load(device, queue, texture_path, *is_normal_map)
+                })
+                .collect::<Result<Vec<_>>>()?;
 
-            let normal_path = mat.normal_texture;
-            let normal_texture =
-                texture::Texture::load(device, queue, containing_folder.join(normal_path), true)?;
+                let normal_texture = textures.pop().unwrap();
+                let diffuse_texture = textures.pop().unwrap();
 
-            materials.push(Material::new(
-                device,
-                &mat.name,
-                diffuse_texture,
-                normal_texture,
-                layout,
-            ));
-        }
+                Ok(Material::new(
+                    device,
+                    &mat.name,
+                    diffuse_texture,
+                    normal_texture,
+                    layout,
+                ))
+            })
+            .collect::<Result<Vec<Material>>>()?;
 
-        let mut meshes = Vec::new();
-        for m in obj_models {
-            let mut vertices = Vec::new();
-            for i in 0..m.mesh.positions.len() / 3 {
-                vertices.push(ModelVertex {
-                    position: [
-                        m.mesh.positions[i * 3],
-                        m.mesh.positions[i * 3 + 1],
-                        m.mesh.positions[i * 3 + 2],
-                    ]
-                    .into(),
-                    tex_coords: [m.mesh.texcoords[i * 2], m.mesh.texcoords[i * 2 + 1]].into(),
-                    normal: [
-                        m.mesh.normals[i * 3],
-                        m.mesh.normals[i * 3 + 1],
-                        m.mesh.normals[i * 3 + 2],
-                    ]
-                    .into(),
-                    tangent: [0.0; 3].into(),
-                    bitangent: [0.0; 3].into(),
+        let meshes = obj_models
+            .par_iter()
+            .map(|m| {
+                let mut vertices = (0..m.mesh.positions.len() / 3)
+                    .into_par_iter()
+                    .map(|i| ModelVertex {
+                        position: [
+                            m.mesh.positions[i * 3],
+                            m.mesh.positions[i * 3 + 1],
+                            m.mesh.positions[i * 3 + 2],
+                        ]
+                        .into(),
+                        tex_coords: [m.mesh.texcoords[i * 2], m.mesh.texcoords[i * 2 + 1]].into(),
+                        normal: [
+                            m.mesh.normals[i * 3],
+                            m.mesh.normals[i * 3 + 1],
+                            m.mesh.normals[i * 3 + 2],
+                        ]
+                        .into(),
+                        tangent: [0.0; 3].into(),
+                        bitangent: [0.0; 3].into(),
+                    })
+                    .collect::<Vec<_>>();
+
+                let indices = &m.mesh.indices;
+
+                for c in indices.chunks_exact(3) {
+                    let v0 = vertices[c[0] as usize];
+                    let v1 = vertices[c[1] as usize];
+                    let v2 = vertices[c[2] as usize];
+
+                    let pos0 = v0.position;
+                    let pos1 = v1.position;
+                    let pos2 = v2.position;
+
+                    let uv0 = v0.tex_coords;
+                    let uv1 = v1.tex_coords;
+                    let uv2 = v2.tex_coords;
+
+                    let delta_pos1 = pos1 - pos0;
+                    let delta_pos2 = pos2 - pos0;
+
+                    let delta_uv1 = uv1 - uv0;
+                    let delta_uv2 = uv2 - uv0;
+
+                    let r = 1.0 / (delta_uv1.x * delta_uv2.y - delta_uv1.y * delta_uv2.x);
+                    let tangent = (delta_pos1 * delta_uv2.y - delta_pos2 * delta_uv1.y) * r;
+                    let bitangent = (delta_pos2 * delta_uv1.x - delta_pos1 * delta_uv2.x) * r;
+
+                    vertices[c[0] as usize].tangent = tangent;
+                    vertices[c[1] as usize].tangent = tangent;
+                    vertices[c[2] as usize].tangent = tangent;
+
+                    vertices[c[0] as usize].bitangent = bitangent;
+                    vertices[c[1] as usize].bitangent = bitangent;
+                    vertices[c[2] as usize].bitangent = bitangent;
+                }
+
+                let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&format!("{:?} Vertex Buffer", path.as_ref())),
+                    contents: bytemuck::cast_slice(&vertices),
+                    usage: wgpu::BufferUsage::VERTEX,
                 });
-            }
+                let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&format!("{:?} Index Buffer", path.as_ref())),
+                    contents: bytemuck::cast_slice(&m.mesh.indices),
+                    usage: wgpu::BufferUsage::INDEX,
+                });
 
-            let indices = &m.mesh.indices;
-
-            for c in indices.chunks(3) {
-                let v0 = vertices[c[0] as usize];
-                let v1 = vertices[c[1] as usize];
-                let v2 = vertices[c[2] as usize];
-
-                let pos0 = v0.position;
-                let pos1 = v1.position;
-                let pos2 = v2.position;
-
-                let uv0 = v0.tex_coords;
-                let uv1 = v1.tex_coords;
-                let uv2 = v2.tex_coords;
-
-                let delta_pos1 = pos1 - pos0;
-                let delta_pos2 = pos2 - pos0;
-
-                let delta_uv1 = uv1 - uv0;
-                let delta_uv2 = uv2 - uv0;
-
-                let r = 1.0 / (delta_uv1.x * delta_uv2.y - delta_uv1.y * delta_uv2.x);
-                let tangent = (delta_pos1 * delta_uv2.y - delta_pos2 * delta_uv1.y) * r;
-                let bitangent = (delta_pos2 * delta_uv1.x - delta_pos1 * delta_uv2.x) * r;
-
-                vertices[c[0] as usize].tangent = tangent;
-                vertices[c[1] as usize].tangent = tangent;
-                vertices[c[2] as usize].tangent = tangent;
-
-                vertices[c[0] as usize].bitangent = bitangent;
-                vertices[c[1] as usize].bitangent = bitangent;
-                vertices[c[2] as usize].bitangent = bitangent;
-            }
-
-            let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(&format!("{:?} Vertex Buffer", path.as_ref())),
-                contents: bytemuck::cast_slice(&vertices),
-                usage: wgpu::BufferUsage::VERTEX,
-            });
-            let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(&format!("{:?} Index Buffer", path.as_ref())),
-                contents: bytemuck::cast_slice(&m.mesh.indices),
-                usage: wgpu::BufferUsage::INDEX,
-            });
-
-            meshes.push(Mesh {
-                name: m.name,
-                vertex_buffer,
-                index_buffer,
-                num_elements: m.mesh.indices.len() as u32,
-                material: m.mesh.material_id.unwrap_or(0),
-            });
-        }
+                Mesh {
+                    name: m.name.clone(),
+                    vertex_buffer,
+                    index_buffer,
+                    num_elements: m.mesh.indices.len() as u32,
+                    material: m.mesh.material_id.unwrap_or(0),
+                }
+            })
+            .collect::<Vec<_>>();
 
         Ok(Self { meshes, materials })
     }
