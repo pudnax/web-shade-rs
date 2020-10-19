@@ -10,7 +10,7 @@ edition = "2018"
 image = "0.23.8"
 winit = "0.23.0"
 futures = "0.3.5"
-# shaderc = "0.6.2"
+shaderc = "0.6.2"
 bytemuck = "1.4.1"
 log = "0.4.11"
 env_logger = "0.7.1"
@@ -30,3 +30,7 @@ shaderc = "0.6"
 
 [profile.dev.package.'*']
 opt-level = 3
+
+[[example]]
+name = "gif"
+path = "examples/gif/src/main.rs"

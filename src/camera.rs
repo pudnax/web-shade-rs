@@ -127,8 +127,8 @@ impl CameraController {
     }
 
     pub fn process_mouse(&mut self, mouse_dx: f64, mouse_dy: f64) {
-        self.rotate_horizontal = mouse_dx as f32;
-        self.rotate_vertical = mouse_dy as f32;
+        self.rotate_horizontal += mouse_dx as f32;
+        self.rotate_vertical += mouse_dy as f32;
     }
 
     pub fn process_scroll(&mut self, delta: &MouseScrollDelta) {
@@ -152,7 +152,7 @@ impl CameraController {
         let scrollward =
             Vec3::new(pitch_cos * yaw_cos, pitch_sin, pitch_cos * yaw_sin).normalized();
         camera.position += scrollward * self.scroll * self.speed * self.sensitivity * dt;
-        self.scroll = 0.;
+        self.scroll = 0.0;
 
         camera.position.y += (self.amount_up - self.amount_down) * self.speed * dt;
 

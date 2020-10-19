@@ -68,6 +68,34 @@ impl std::ops::Mul<f32> for Deg {
     }
 }
 
+impl std::ops::Add<f32> for Rad {
+    type Output = Self;
+    fn add(self, rhs: f32) -> Self::Output {
+        Self(self.0 + rhs)
+    }
+}
+
+impl std::ops::Add<f32> for Deg {
+    type Output = Self;
+    fn add(self, rhs: f32) -> Self::Output {
+        Self(self.0 + rhs)
+    }
+}
+
+impl std::ops::Sub<f32> for Rad {
+    type Output = Self;
+    fn sub(self, rhs: f32) -> Self::Output {
+        Self(self.0 - rhs)
+    }
+}
+
+impl std::ops::Sub<f32> for Deg {
+    type Output = Self;
+    fn sub(self, rhs: f32) -> Self::Output {
+        Self(self.0 - rhs)
+    }
+}
+
 impl std::ops::AddAssign<Rad> for Rad {
     fn add_assign(&mut self, rhs: Rad) {
         self.0 = self.0 + rhs.0;

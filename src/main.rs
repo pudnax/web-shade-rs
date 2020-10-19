@@ -37,13 +37,13 @@ impl Uniforms {
     fn new() -> Self {
         Self {
             view_position: Vec4::zero(),
-            view_proj: Mat4::from_scale_4d(0.),
+            view_proj: Mat4::identity(),
         }
     }
 
     fn update_view_proj(&mut self, camera: &camera::Camera, projection: &camera::Projection) {
-        self.view_position = camera.position.into_homogeneous_point();
-        self.view_proj = projection.calc_matrix() * camera.calc_matrix()
+        self.view_position = camera.position.into_homogeneous_vector();
+        self.view_proj = projection.calc_matrix() * camera.calc_matrix();
     }
 }
 unsafe impl bytemuck::Zeroable for Uniforms {}
@@ -243,8 +243,8 @@ impl State {
             });
         let camera = camera::Camera::new((0.0, 5.0, 10.0), Deg(-90.0), Deg(-20.0));
         let projection =
-            camera::Projection::new(sc_desc.width, sc_desc.height, Deg(45.0), 0.1, 100.0);
-        let camera_controller = camera::CameraController::new(4.0, 0.4);
+            camera::Projection::new(sc_desc.width, sc_desc.height, Deg(90.0), 0.1, 100.0);
+        let camera_controller = camera::CameraController::new(8.0, 0.4);
 
         let mut uniforms = Uniforms::new();
         uniforms.update_view_proj(&camera, &projection);
